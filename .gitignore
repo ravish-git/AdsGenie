@@ -54,3 +54,5 @@ browser_recordings
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+.next/

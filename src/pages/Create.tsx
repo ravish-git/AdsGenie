@@ -1,36 +1,92 @@
-import { useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Upload, Image as ImageIcon, X, Loader2, Download, Play, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import { useAuth } from "@/contexts/AuthContext";
+import { useNavigate } from "react-router-dom";
+import { db } from "@/lib/firebase";
+import { collection, doc, getDoc, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
 
-const adStyles = [
-  { id: "modern", label: "Modern" },
-  { id: "minimal", label: "Minimal" },
-  { id: "bold", label: "Bold" },
-  { id: "elegant", label: "Elegant" },
-  { id: "playful", label: "Playful" },
+const sizeOptions = [
+  { id: "1:1", label: "1:1" },
+  { id: "16:9", label: "16:9" },
+  { id: "9:16", label: "9:16" },
 ];
 
-const platforms = [
-  { id: "instagram", label: "Instagram", size: "1080×1080" },
-  { id: "facebook", label: "Facebook", size: "1200×628" },
-  { id: "story", label: "Story", size: "1080×1920" },
-  { id: "twitter", label: "Twitter/X", size: "1200×675" },
-];
+async function parseApiResponse(response: Response) {
+  const rawText = await response.text();
+  let data: any = null;
+
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = { rawText };
+    }
+  }
+
+  if (!response.ok) {
+    const message =
+      data?.error ||
+      data?.message ||
+      (data?.rawText ? `${response.status} ${response.statusText}: ${data.rawText}` : `${response.status} ${response.statusText}`);
+    throw new Error(message);
+  }
+
+  if (!data) {
+    throw new Error("Empty response from API route. Ensure Next.js API is running.");
+  }
+
+  return data;
+}
 
 export default function Create() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [image, setImage] = useState<string | null>(null);
   const [description, setDescription] = useState("");
-  const [selectedStyle, setSelectedStyle] = useState("modern");
-  const [selectedPlatform, setSelectedPlatform] = useState("instagram");
+  const [selectedSize, setSelectedSize] = useState("1:1");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAds, setGeneratedAds] = useState<string[]>([]);
+  const [generatedAdIds, setGeneratedAdIds] = useState<string[]>([]);
   const [animatingIndex, setAnimatingIndex] = useState<number | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [selectedAdIndex, setSelectedAdIndex] = useState<number | null>(null);
+  const [freeGenerationsLeft, setFreeGenerationsLeft] = useState<number>(4);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadPlanUsage = async () => {
+    if (!user) return;
+    try {
+      const userRef = doc(db, "users", user.uid);
+      const snap = await getDoc(userRef);
+      if (!snap.exists()) {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email || "",
+          plan: "free",
+          freeGenerationsLeft: 4,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        setFreeGenerationsLeft(4);
+        return;
+      }
+      const left = snap.data()?.freeGenerationsLeft;
+      setFreeGenerationsLeft(typeof left === "number" ? left : 4);
+    } catch (error) {
+      console.error("Failed to load plan usage:", error);
+      setFreeGenerationsLeft(4);
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      void loadPlanUsage();
+    }
+  }, [user]);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -39,6 +95,7 @@ export default function Create() {
       reader.onloadend = () => {
         setImage(reader.result as string);
         setGeneratedAds([]);
+        setGeneratedAdIds([]);
         setVideoUrl(null);
         setSelectedAdIndex(null);
       };
@@ -47,6 +104,11 @@ export default function Create() {
   };
 
   const handleGenerate = async () => {
+    if (!user) {
+      toast.error("Please log in to generate ads");
+      navigate("/auth");
+      return;
+    }
     if (!image) {
       toast.error("Please upload a product image");
       return;
@@ -55,35 +117,81 @@ export default function Create() {
       toast.error("Please add a product description");
       return;
     }
-
     setIsGenerating(true);
     setGeneratedAds([]);
+    setGeneratedAdIds([]);
     setVideoUrl(null);
     setSelectedAdIndex(null);
 
     try {
-      const { functions } = await import("@/lib/firebase");
-      const { httpsCallable } = await import("firebase/functions");
-      const generateAds = httpsCallable(functions, 'generateAds');
+      const userRef = doc(db, "users", user.uid);
+      const nextLeft = await runTransaction(db, async (tx) => {
+        const userSnap = await tx.get(userRef);
+        const current = userSnap.exists() ? (userSnap.data()?.freeGenerationsLeft ?? 4) : 4;
+        if (current <= 0) {
+          throw new Error("No free generations left");
+        }
+        const updated = current - 1;
+        tx.set(userRef, { freeGenerationsLeft: updated, updatedAt: Date.now() }, { merge: true });
+        return updated;
+      });
+      setFreeGenerationsLeft(nextLeft);
 
-      const result = await generateAds({
+      const response = await fetch("/api/generate-ads", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
         imageBase64: image,
         description,
-        style: selectedStyle,
-        platform: selectedPlatform,
+        size: selectedSize,
+        }),
       });
-
-      const data = result.data as any;
+      const data = await parseApiResponse(response);
 
       if (data?.images?.length > 0) {
+        const userAdsRef = collection(db, "users", user.uid, "ads");
+        const adIds: string[] = [];
+        for (const imageUrl of data.images) {
+          const adRef = doc(userAdsRef);
+          await setDoc(adRef, {
+            id: adRef.id,
+            uid: user.uid,
+            description,
+            aspectRatio: selectedSize,
+            sourceImageUrl: data?.sourceImageUrl || image,
+            imageUrl,
+            videoUrl: null,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          adIds.push(adRef.id);
+        }
+
         setGeneratedAds(data.images);
-        toast.success(`${data.images.length} ad variations generated!`);
+        setGeneratedAdIds(adIds);
+        toast.success(`${data.images.length} AI product images created!`);
       } else {
         toast.error("No images were generated. Please try again.");
       }
     } catch (err: any) {
       console.error("Generation error:", err);
-      toast.error(err.message || "Failed to generate ads");
+      if (err.message === "No free generations left") {
+        setFreeGenerationsLeft(0);
+        toast.error("Free plan limit reached. Upgrade to continue.");
+      } else {
+        if (user) {
+          const userRef = doc(db, "users", user.uid);
+          await runTransaction(db, async (tx) => {
+            const userSnap = await tx.get(userRef);
+            const current = userSnap.exists() ? (userSnap.data()?.freeGenerationsLeft ?? 0) : 0;
+            tx.set(userRef, { freeGenerationsLeft: current + 1, updatedAt: Date.now() }, { merge: true });
+          });
+          await loadPlanUsage();
+        }
+        toast.error(err.message || "Failed to generate ads");
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -98,18 +206,30 @@ export default function Create() {
     setVideoUrl(null);
 
     try {
-      const { functions } = await import("@/lib/firebase");
-      const { httpsCallable } = await import("firebase/functions");
-      const animateAd = httpsCallable(functions, 'animateAd');
-
-      const result = await animateAd({
+      const response = await fetch("/api/animate-ad", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
         imageBase64: adImage,
-        description: `Animate this ${selectedStyle} advertisement: ${description}`,
+        description: `Animate this product advertisement: ${description}`,
+        }),
       });
-
-      const data = result.data as any;
+      const data = await parseApiResponse(response);
 
       if (data?.videoUrl) {
+        const adId = generatedAdIds[index];
+        if (adId) {
+          await setDoc(
+            doc(db, "users", user!.uid, "ads", adId),
+            {
+              videoUrl: data.videoUrl,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
         setVideoUrl(data.videoUrl);
         toast.success("Video generated!");
       } else if (data?.taskId) {
@@ -175,7 +295,7 @@ export default function Create() {
                 <div className="relative group">
                   <img src={image} alt="Product" className="w-full h-64 object-cover rounded-md" />
                   <button
-                    onClick={() => { setImage(null); setGeneratedAds([]); setVideoUrl(null); }}
+                    onClick={() => { setImage(null); setGeneratedAds([]); setGeneratedAdIds([]); setVideoUrl(null); }}
                     className="absolute top-2 right-2 p-2 bg-background/90 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
                   >
                     <X className="w-4 h-4" />
@@ -208,46 +328,22 @@ export default function Create() {
               />
             </div>
 
-            {/* Style Selection */}
+            {/* Size Selection */}
             <div className="border border-border rounded-md p-6 bg-card">
               <h3 className="font-display font-semibold text-sm uppercase tracking-wider mb-4 text-muted-foreground">
-                Style
+                Size
               </h3>
               <div className="flex flex-wrap gap-2">
-                {adStyles.map((style) => (
+                {sizeOptions.map((size) => (
                   <button
-                    key={style.id}
-                    onClick={() => setSelectedStyle(style.id)}
-                    className={`px-4 py-2 rounded-md text-xs font-medium uppercase tracking-wider transition-all border ${selectedStyle === style.id
+                    key={size.id}
+                    onClick={() => setSelectedSize(size.id)}
+                    className={`px-4 py-2 rounded-md text-xs font-medium uppercase tracking-wider transition-all border ${selectedSize === size.id
                       ? "bg-primary text-primary-foreground border-primary"
                       : "bg-transparent border-border text-muted-foreground hover:text-foreground hover:border-muted-foreground"
                       }`}
                   >
-                    {style.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Platform Selection */}
-            <div className="border border-border rounded-md p-6 bg-card">
-              <h3 className="font-display font-semibold text-sm uppercase tracking-wider mb-4 text-muted-foreground">
-                Platform
-              </h3>
-              <div className="grid grid-cols-2 gap-2">
-                {platforms.map((platform) => (
-                  <button
-                    key={platform.id}
-                    onClick={() => setSelectedPlatform(platform.id)}
-                    className={`p-3 rounded-md text-left transition-all border ${selectedPlatform === platform.id
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-transparent border-border hover:border-muted-foreground"
-                      }`}
-                  >
-                    <p className="font-medium text-xs uppercase tracking-wider">{platform.label}</p>
-                    <p className={`text-xs mt-0.5 ${selectedPlatform === platform.id ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
-                      {platform.size}
-                    </p>
+                    {size.label}
                   </button>
                 ))}
               </div>
@@ -267,9 +363,12 @@ export default function Create() {
                   Generating Ads...
                 </>
               ) : (
-                "Generate 4 Ad Variations"
+                "Create AI Product Image"
               )}
             </Button>
+            <p className="text-xs text-muted-foreground text-center">
+              Free plan generations left: {freeGenerationsLeft}
+            </p>
           </motion.div>
 
           {/* Results Section */}
@@ -287,7 +386,7 @@ export default function Create() {
               {isGenerating ? (
                 <div className="aspect-square bg-muted rounded-md flex flex-col items-center justify-center gap-4">
                   <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                  <p className="text-muted-foreground text-sm">AI is generating your ad variations...</p>
+                  <p className="text-muted-foreground text-sm">AI is generating your product ad image...</p>
                   <p className="text-muted-foreground text-xs">This may take up to a minute</p>
                 </div>
               ) : generatedAds.length > 0 ? (
@@ -371,7 +470,7 @@ export default function Create() {
                   {animatingIndex !== null && !videoUrl ? (
                     <div className="aspect-video bg-muted rounded-md flex flex-col items-center justify-center gap-3">
                       <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                      <p className="text-muted-foreground text-sm">Creating 5-second video...</p>
+                      <p className="text-muted-foreground text-sm">Creating video...</p>
                     </div>
                   ) : videoUrl ? (
                     <div className="space-y-3">

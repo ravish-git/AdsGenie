@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { auth } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import {
   signInWithPopup,
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
-  signInWithEmailAndPassword
+  signInWithEmailAndPassword,
+  updateProfile
 } from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +20,7 @@ export default function Auth() {
   const [loading, setLoading] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -32,11 +35,35 @@ export default function Auth() {
     setLoading(true);
     try {
       const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+      const userCredential = await signInWithPopup(auth, provider);
+      const userRef = doc(db, "users", userCredential.user.uid);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        await setDoc(userRef, {
+          uid: userCredential.user.uid,
+          email: userCredential.user.email || "",
+          plan: "free",
+          freeGenerationsLeft: 4,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      }
       // Navigation handled by useEffect
     } catch (err: any) {
-      toast.error(err.message || "Failed to sign in with Google");
-      console.error(err);
+      console.error("Google Sign In Error:", err);
+      let errorMessage = "Failed to sign in with Google";
+
+      if (err.code === 'auth/popup-closed-by-user') {
+        errorMessage = "Sign-in cancelled";
+      } else if (err.code === 'auth/popup-blocked') {
+        errorMessage = "Popup was blocked by the browser. Please allow popups.";
+      } else if (err.code === 'auth/cancelled-popup-request') {
+        errorMessage = "Another popup is already open. Please close it and try again.";
+      } else if (err.code) {
+        errorMessage = `${errorMessage}: ${err.code}`;
+      }
+
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -45,11 +72,47 @@ export default function Auth() {
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) return;
+    if (isSignUp && !username) {
+      toast.error("Please enter a username");
+      return;
+    }
 
     setLoading(true);
     try {
       if (isSignUp) {
-        await createUserWithEmailAndPassword(auth, email, password);
+        // Username validation
+        const usernameRegex = /^[a-zA-Z0-9_-]+$/;
+        if (!usernameRegex.test(username)) {
+          throw new Error("Username can only contain letters, numbers, underscores, and hyphens (no spaces).");
+        }
+        if (username.length < 3) {
+          throw new Error("Username must be at least 3 characters long.");
+        }
+
+        // Check uniqueness
+        const usernameRef = doc(db, "usernames", username);
+        const usernameSnap = await getDoc(usernameRef);
+        if (usernameSnap.exists()) {
+          throw new Error("Username already taken. Please choose another.");
+        }
+
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+
+        // Save username
+        await updateProfile(userCredential.user, {
+          displayName: username
+        });
+        await setDoc(usernameRef, { uid: userCredential.user.uid });
+        await setDoc(doc(db, "users", userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          email: userCredential.user.email || email,
+          username,
+          plan: "free",
+          freeGenerationsLeft: 4,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
         toast.success("Account created successfully!");
       } else {
         await signInWithEmailAndPassword(auth, email, password);
@@ -87,6 +150,20 @@ export default function Auth() {
           </p>
 
           <form onSubmit={handleEmailAuth} className="space-y-4 mb-4">
+            {isSignUp && (
+              <div>
+                <Input
+                  type="text"
+                  placeholder="Username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                />
+                <p className="text-[10px] text-muted-foreground mt-1 text-left px-1">
+                  No spaces, 3+ characters (a-z, 0-9, -, _)
+                </p>
+              </div>
+            )}
             <Input
               type="email"
               placeholder="Email"

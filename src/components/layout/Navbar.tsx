@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Menu, X, Zap, Image, FolderOpen, Crown, User, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 const navItems = [
   { path: "/", label: "Home", icon: Zap },
@@ -47,14 +48,22 @@ export function Navbar() {
 
           <div className="hidden md:flex items-center gap-2">
             {user ? (
-              <>
-                <span className="text-xs text-muted-foreground truncate max-w-[150px]">
-                  {user.email}
-                </span>
-                <Button variant="ghost" size="sm" onClick={signOut}>
+              <div className="flex items-center gap-2">
+                <Avatar className="h-8 w-8">
+                  <AvatarImage src={user.photoURL || undefined} alt={user.displayName || "User"} />
+                  <AvatarFallback className="bg-primary/10 text-primary font-medium">
+                    {user.displayName ? user.displayName[0].toUpperCase() : user.email ? user.email[0].toUpperCase() : "U"}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="hidden lg:flex flex-col">
+                  <span className="text-xs font-medium truncate max-w-[150px]">
+                    {user.displayName || user.email}
+                  </span>
+                </div>
+                <Button variant="ghost" size="icon" onClick={signOut}>
                   <LogOut className="w-4 h-4" />
                 </Button>
-              </>
+              </div>
             ) : (
               <Link to="/auth">
                 <Button variant="gradient" size="sm">
@@ -98,10 +107,15 @@ export function Navbar() {
                 );
               })}
               {user ? (
-                <Button variant="outline" className="w-full mt-4" onClick={signOut}>
-                  <LogOut className="w-4 h-4 mr-2" />
-                  Sign Out
-                </Button>
+                <div className="flex flex-col gap-2 mt-4">
+                  <div className="px-2 text-sm text-muted-foreground font-medium">
+                    {user.displayName || user.email}
+                  </div>
+                  <Button variant="outline" className="w-full" onClick={signOut}>
+                    <LogOut className="w-4 h-4 mr-2" />
+                    Sign Out
+                  </Button>
+                </div>
               ) : (
                 <Link to="/auth" onClick={() => setIsOpen(false)}>
                   <Button variant="gradient" className="w-full mt-4">

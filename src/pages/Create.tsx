@@ -1,3 +1,4 @@
+"use client";
 import { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Upload, Image as ImageIcon, X, Loader2, Download, Play, Check } from "lucide-react";
@@ -5,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
-import { useNavigate } from "react-router-dom";
+  // import { useNavigate } from "react-router-dom";
+  import { useRouter } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { collection, doc, getDoc, runTransaction, serverTimestamp, setDoc } from "firebase/firestore";
 
@@ -44,7 +46,12 @@ async function parseApiResponse(response: Response) {
 
 export default function Create() {
   const { user } = useAuth();
-  const navigate = useNavigate();
+  // const navigate = useNavigate();
+  const router = useRouter();
+
+router.push("/create");
+router.push("/auth");
+
   const [image, setImage] = useState<string | null>(null);
   const [description, setDescription] = useState("");
   const [selectedSize, setSelectedSize] = useState("1:1");
@@ -136,7 +143,7 @@ export default function Create() {
   const handleGenerate = async () => {
     if (!user) {
       toast.error("Please log in to generate ads");
-      navigate("/auth");
+      router.push("/auth");
       return;
     }
     if (!image) {

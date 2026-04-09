@@ -94,18 +94,42 @@ export default function Create() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImage(reader.result as string);
-        setGeneratedAds([]);
-        setGeneratedAdIds([]);
-        setIsSlideshowVisible(false);
-        setIsSlideshowPlaying(false);
-        setSlideshowFrame(0);
-        setSlideshowVideoUrl(null);
-        setSelectedAdIndex(null);
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth || img.width || 1024;
+          canvas.height = img.naturalHeight || img.height || 1024;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Canvas context unavailable");
+
+          // Export as PNG from canvas to normalize input for OpenAI edits.
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const pngDataUrl = canvas.toDataURL("image/png");
+          setImage(pngDataUrl);
+        } catch {
+          // Fallback to reader path if conversion fails.
+          const reader = new FileReader();
+          reader.onloadend = () => setImage(reader.result as string);
+          reader.readAsDataURL(file);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+          setGeneratedAds([]);
+          setGeneratedAdIds([]);
+          setIsSlideshowVisible(false);
+          setIsSlideshowPlaying(false);
+          setSlideshowFrame(0);
+          setSlideshowVideoUrl(null);
+          setSelectedAdIndex(null);
+        }
       };
-      reader.readAsDataURL(file);
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        toast.error("Failed to process image. Try another file.");
+      };
+      img.src = objectUrl;
     }
   };
 

@@ -9,13 +9,6 @@ const imageKit = new ImageKit({
   urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT || "dummy",
 });
 
-function toImageBlob(imageBase64: string): Blob {
-  const isDataUrl = imageBase64.startsWith("data:");
-  const b64 = isDataUrl ? imageBase64.split(",")[1] : imageBase64;
-  const buffer = Buffer.from(b64, "base64");
-  return new Blob([buffer], { type: "image/png" });
-}
-
 export async function POST(request: Request) {
   try {
     const { imageBase64, description, size } = await request.json();
@@ -42,86 +35,105 @@ export async function POST(request: Request) {
     if (!sourceImageUrl) {
       return NextResponse.json({ error: "Failed to upload source image to ImageKit" }, { status: 500 });
     }
-    const sourcePngUrl = `${sourceImageUrl}${sourceImageUrl.includes("?") ? "&" : "?"}tr=f-png`;
-
-    const openAiSizeMap: Record<string, string> = {
+    const imageSizeMap: Record<string, string> = {
       "1:1": "1024x1024",
       "16:9": "1792x1024",
       "9:16": "1024x1792",
     };
-    const imageSize = openAiSizeMap[size] || "1024x1024";
-
-    // const prompt = `Create a professional product ad image sequence for a slideshow. Product details: ${description}. Keep the same product identity, same product colors/logo, and same overall visual style across all frames. Output should follow aspect ratio ${size || "1:1"} with clean marketing layout and ad-ready visual quality.`;
-    // const sequenceSteps = [
-    //   "Frame 1 (Hook): clean hero product intro with minimal text and strong focus on the product and include brand name",
-    //   "Frame 2 (Feature): same scene style, highlight one key product benefit with subtle composition change with one feature given in description",
-    //   "Frame 3 (Lifestyle/Use): same product and visual style, show contextual usage while keeping brand consistency.",
-    //   "Frame 4 (CTA): same style and product identity, end frame with promotional call-to-action and offer emphasis with discount given in description",
-    // ];
+    const requestedSize = imageSizeMap[size] || "1024x1024";
+    const imageKitRatioTransform: Record<string, string> = {
+      "1:1": "ar-1-1",
+      "16:9": "ar-16-9",
+      "9:16": "ar-9-16",
+    };
+    const ratioTransform = imageKitRatioTransform[size] || "ar-1-1";
 
 
-    const prompt = `Create a professional product ad image sequence for a slideshow. Product details: ${description}. Keep the same product identity, same product colors/logo, and same overall visual style across all frames. Output should follow aspect ratio ${size || "1:1"} with clean marketing layout and ad-ready visual quality.`;
-    const sequenceSteps = [
-      "Frame 1 (Hook): clean hero product intro with minimal text and strong focus on the product and include brand name given in description",
-      "Frame 2 (Feature): same scene style, highlight one key product benefit with subtle composition change with one feature given in description",
-      "Frame 3 (Lifestyle/Use): Same product shown in a realistic lifestyle setting: modern lifestyle scene.Natural lighting, cinematic depth of field. No text,focus on real-world usage",
-      "Frame 4 (CTA): same style and product identity, end frame with promotional call-to-action and offer emphasis with discount given in description",
-    ];
-
+    const prompt = `Create a premium, professional product advertisement image using this product reference image URL: ${sourceImageUrl}. Product details: ${description}. Keep the same product identity (same item, brand/logo, and recognizable design), but generate a NEW ad creative: new commercial background, new composition, studio-grade lighting, modern typography regions, and campaign-ready visual hierarchy. Do not recreate the original photo framing or plain background. Make it look like a polished paid social media ad.`;
 
 
 
     const images: string[] = [];
+    let selectedModel = "gpt-image-1";
+    let imageSize = requestedSize;
+
+    const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
+      return btoa(binary);
+    };
+
     for (let i = 0; i < 4; i++) {
-      let sourceBlob = toImageBlob(imageBase64);
-      try {
-        const pngRes = await fetch(sourcePngUrl);
-        if (pngRes.ok) {
-          const pngBuffer = Buffer.from(await pngRes.arrayBuffer());
-          sourceBlob = new Blob([pngBuffer], { type: "image/png" });
-        }
-      } catch (e) {
-        console.warn("Falling back to base64 image blob for OpenAI edit:", e);
-      }
+      const payload = {
+        model: selectedModel,
+        prompt: `${prompt} Create one distinct professional ad variation (${i + 1}/4).`,
+        size: imageSize,
+      };
 
-      const form = new FormData();
-      form.append("model", "dall-e-2");
-      form.append(
-        "prompt",
-        `${prompt} ${sequenceSteps[i] || sequenceSteps[sequenceSteps.length - 1]} Ensure this frame transitions naturally from the previous frame and is optimized for slideshow continuity.`
-      );
-      form.append("size", imageSize);
-      form.append("response_format", "b64_json");
-      form.append("image", sourceBlob, `source-${i + 1}.png`);
-
-      const openAiRes = await fetch("https://api.openai.com/v1/images/edits", {
+      const openAiRes = await fetch("https://api.openai.com/v1/images/generations", {
         method: "POST",
         headers: {
+          "Content-Type": "application/json",
           Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
-        body: form,
+        body: JSON.stringify(payload),
       });
 
+      let response: any;
       if (!openAiRes.ok) {
         const errorText = await openAiRes.text();
-        throw new Error(errorText || "OpenAI image edit request failed");
+        const unsupportedModel = errorText.includes("Value must be 'dall-e-2'") || errorText.includes("\"param\": \"model\"");
+        if (selectedModel === "gpt-image-1" && unsupportedModel) {
+          // Account/key fallback: retry this frame with dall-e-2 constraints.
+          selectedModel = "dall-e-2";
+          imageSize = "1024x1024";
+          const retryRes = await fetch("https://api.openai.com/v1/images/generations", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: selectedModel,
+              prompt: `${prompt} Create one distinct professional ad variation (${i + 1}/4).`,
+              size: imageSize,
+            }),
+          });
+          if (!retryRes.ok) {
+            const retryText = await retryRes.text();
+            throw new Error(retryText || "OpenAI image edit request failed");
+          }
+          response = await retryRes.json();
+        } else {
+          throw new Error(errorText || "OpenAI image edit request failed");
+        }
+      } else {
+        response = await openAiRes.json();
       }
 
-      const response = await openAiRes.json();
+      const resultItem = response?.data?.[0];
+      let imageFileBase64: string | null = resultItem?.b64_json || null;
+      if (!imageFileBase64 && resultItem?.url) {
+        const imgRes = await fetch(resultItem.url);
+        if (imgRes.ok) {
+          imageFileBase64 = arrayBufferToBase64(await imgRes.arrayBuffer());
+        }
+      }
 
-      const b64Image = response?.data?.[0]?.b64_json;
-      if (!b64Image) {
+      if (!imageFileBase64) {
         continue;
       }
 
       const generatedUpload = await imageKit.upload({
-        file: b64Image,
+        file: imageFileBase64,
         fileName: `generated-ad-${Date.now()}-${i + 1}.png`,
         folder: "/ads-genie/generated/",
       });
 
       if (generatedUpload?.url) {
-        images.push(generatedUpload.url);
+        const ratioUrl = `${generatedUpload.url}${generatedUpload.url.includes("?") ? "&" : "?"}tr=${ratioTransform},c-at_max`;
+        images.push(ratioUrl);
       }
     }
 

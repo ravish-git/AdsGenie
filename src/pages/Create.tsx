@@ -51,8 +51,11 @@ export default function Create() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAds, setGeneratedAds] = useState<string[]>([]);
   const [generatedAdIds, setGeneratedAdIds] = useState<string[]>([]);
-  const [animatingIndex, setAnimatingIndex] = useState<number | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [isPreparingSlideshow, setIsPreparingSlideshow] = useState(false);
+  const [isSlideshowVisible, setIsSlideshowVisible] = useState(false);
+  const [isSlideshowPlaying, setIsSlideshowPlaying] = useState(false);
+  const [slideshowFrame, setSlideshowFrame] = useState(0);
+  const [slideshowVideoUrl, setSlideshowVideoUrl] = useState<string | null>(null);
   const [selectedAdIndex, setSelectedAdIndex] = useState<number | null>(null);
   const [freeGenerationsLeft, setFreeGenerationsLeft] = useState<number>(4);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -96,7 +99,10 @@ export default function Create() {
         setImage(reader.result as string);
         setGeneratedAds([]);
         setGeneratedAdIds([]);
-        setVideoUrl(null);
+        setIsSlideshowVisible(false);
+        setIsSlideshowPlaying(false);
+        setSlideshowFrame(0);
+        setSlideshowVideoUrl(null);
         setSelectedAdIndex(null);
       };
       reader.readAsDataURL(file);
@@ -120,7 +126,10 @@ export default function Create() {
     setIsGenerating(true);
     setGeneratedAds([]);
     setGeneratedAdIds([]);
-    setVideoUrl(null);
+    setIsSlideshowVisible(false);
+    setIsSlideshowPlaying(false);
+    setSlideshowFrame(0);
+    setSlideshowVideoUrl(null);
     setSelectedAdIndex(null);
 
     try {
@@ -197,62 +206,106 @@ export default function Create() {
     }
   };
 
-  const handleAnimate = async (index: number) => {
-    const adImage = generatedAds[index];
-    if (!adImage) return;
-
-    setAnimatingIndex(index);
-    setSelectedAdIndex(index);
-    setVideoUrl(null);
-
+  const handleAnimate = async () => {
+    if (!generatedAds.length) return;
+    setIsPreparingSlideshow(true);
+    setSlideshowFrame(0);
+    setIsSlideshowVisible(true);
+    setIsSlideshowPlaying(true);
+    setSelectedAdIndex(0);
     try {
-      const response = await fetch("/api/animate-ad", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-        imageBase64: adImage,
-        description: `Animate this product advertisement: ${description}`,
-        }),
-      });
-      const data = await parseApiResponse(response);
+      const createImageFromUrl = async (url: string) => {
+        const res = await fetch(url);
+        const blob = await res.blob();
+        const localUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error("Failed to load slideshow frame"));
+          img.src = localUrl;
+        });
+        URL.revokeObjectURL(localUrl);
+        return img;
+      };
 
-      if (data?.videoUrl) {
-        const adId = generatedAdIds[index];
-        if (adId) {
+      const firstImg = await createImageFromUrl(generatedAds[0]);
+      const canvas = document.createElement("canvas");
+      canvas.width = firstImg.naturalWidth || 1024;
+      canvas.height = firstImg.naturalHeight || 1024;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas not available");
+
+      const stream = canvas.captureStream(30);
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+
+      recorder.start();
+      for (const imageUrl of generatedAds) {
+        const img = await createImageFromUrl(imageUrl);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+      recorder.stop();
+
+      const videoBlob = await new Promise<Blob>((resolve) => {
+        recorder.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+      });
+
+      const buffer = await videoBlob.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const videoBase64 = btoa(binary);
+
+      const uploadRes = await fetch("/api/upload-slideshow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoBase64 }),
+      });
+      const uploadData = await parseApiResponse(uploadRes);
+      const uploadedVideoUrl = uploadData?.videoUrl || null;
+      setSlideshowVideoUrl(uploadedVideoUrl);
+
+      if (uploadedVideoUrl && user && generatedAdIds.length) {
+        for (const adId of generatedAdIds) {
           await setDoc(
-            doc(db, "users", user!.uid, "ads", adId),
+            doc(db, "users", user.uid, "ads", adId),
             {
-              videoUrl: data.videoUrl,
+              videoUrl: uploadedVideoUrl,
               updatedAt: serverTimestamp(),
             },
             { merge: true }
           );
         }
-        setVideoUrl(data.videoUrl);
-        toast.success("Video generated!");
-      } else if (data?.taskId) {
-        // Fallback if the function returns a taskId (though our implementation awaits)
-        toast.info("Video processing started...");
       }
+
+      toast.success("Slideshow video ready and saved to My Ads!");
     } catch (err: any) {
-      console.error("Animation error:", err);
-      toast.error(err.message || "Failed to animate ad");
+      console.error("Slideshow video error:", err);
+      toast.error(err.message || "Failed to build slideshow video");
     } finally {
-      setAnimatingIndex(null);
+      setIsPreparingSlideshow(false);
     }
   };
 
-  // Removed polling logic as Cloud Functions can await the result directly
+  useEffect(() => {
+    if (!isSlideshowPlaying || generatedAds.length === 0) return;
+    const timer = setInterval(() => {
+      setSlideshowFrame((prev) => (prev + 1) % generatedAds.length);
+    }, 1600);
+    return () => clearInterval(timer);
+  }, [isSlideshowPlaying, generatedAds.length]);
 
-
-  const handleDownload = (url: string, type: "image" | "video") => {
+  const handleDownload = (url: string, type: "image") => {
     const link = document.createElement("a");
     link.href = url;
-    link.download = `ad-${Date.now()}.${type === "video" ? "mp4" : "png"}`;
+    link.download = `ad-${Date.now()}.png`;
     link.click();
-    toast.success(`${type === "video" ? "Video" : "Image"} downloaded!`);
+    toast.success("Image downloaded!");
   };
 
   return (
@@ -295,7 +348,7 @@ export default function Create() {
                 <div className="relative group">
                   <img src={image} alt="Product" className="w-full h-64 object-cover rounded-md" />
                   <button
-                    onClick={() => { setImage(null); setGeneratedAds([]); setGeneratedAdIds([]); setVideoUrl(null); }}
+                    onClick={() => { setImage(null); setGeneratedAds([]); setGeneratedAdIds([]); setIsSlideshowVisible(false); setIsSlideshowPlaying(false); setSlideshowFrame(0); }}
                     className="absolute top-2 right-2 p-2 bg-background/90 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
                   >
                     <X className="w-4 h-4" />
@@ -416,22 +469,6 @@ export default function Create() {
                       <div className="absolute inset-0 bg-background/70 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
                         <Button
                           size="sm"
-                          variant="default"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleAnimate(index);
-                          }}
-                          disabled={animatingIndex !== null}
-                        >
-                          {animatingIndex === index ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Play className="w-4 h-4" />
-                          )}
-                          Animate
-                        </Button>
-                        <Button
-                          size="sm"
                           variant="outline"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -453,11 +490,28 @@ export default function Create() {
                   <p className="text-sm text-muted-foreground">Your generated ads will appear here</p>
                 </div>
               )}
+              {generatedAds.length > 0 && (
+                <div className="mt-4">
+                  <Button
+                    variant="default"
+                    className="w-full"
+                    onClick={handleAnimate}
+                    disabled={isPreparingSlideshow}
+                  >
+                    {isPreparingSlideshow ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Play className="w-4 h-4" />
+                    )}
+                    Animate Slideshow
+                  </Button>
+                </div>
+              )}
             </div>
 
-            {/* Video Preview */}
+            {/* Slideshow Preview */}
             <AnimatePresence>
-              {(videoUrl || animatingIndex !== null) && (
+              {(isSlideshowVisible || isPreparingSlideshow) && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -465,30 +519,62 @@ export default function Create() {
                   className="border border-border rounded-md p-6 bg-card"
                 >
                   <h3 className="font-display font-semibold text-sm uppercase tracking-wider mb-4 text-muted-foreground">
-                    Animated Video
+                    Slideshow Preview
                   </h3>
-                  {animatingIndex !== null && !videoUrl ? (
+                  {isPreparingSlideshow && !isSlideshowVisible ? (
                     <div className="aspect-video bg-muted rounded-md flex flex-col items-center justify-center gap-3">
                       <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                      <p className="text-muted-foreground text-sm">Creating video...</p>
+                      <p className="text-muted-foreground text-sm">Preparing slideshow...</p>
                     </div>
-                  ) : videoUrl ? (
+                  ) : isSlideshowVisible ? (
                     <div className="space-y-3">
-                      <video
-                        src={videoUrl}
-                        controls
-                        autoPlay
-                        loop
-                        className="w-full rounded-md"
-                      />
-                      <Button
-                        variant="default"
-                        className="w-full"
-                        onClick={() => handleDownload(videoUrl, "video")}
-                      >
-                        <Download className="w-4 h-4" />
-                        Download Video
-                      </Button>
+                      <div className="aspect-video bg-muted rounded-md overflow-hidden relative">
+                        <AnimatePresence mode="wait">
+                          <motion.img
+                            key={slideshowFrame}
+                            src={generatedAds[slideshowFrame]}
+                            alt={`Slideshow frame ${slideshowFrame + 1}`}
+                            className="w-full h-full object-cover"
+                            initial={{ opacity: 0, scale: 1.04 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.98 }}
+                            transition={{ duration: 0.45 }}
+                          />
+                        </AnimatePresence>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="default"
+                          className="flex-1"
+                          onClick={() => setIsSlideshowPlaying((v) => !v)}
+                        >
+                          <Play className="w-4 h-4" />
+                          {isSlideshowPlaying ? "Pause" : "Play"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="flex-1"
+                          onClick={() => handleDownload(generatedAds[slideshowFrame], "image")}
+                        >
+                          <Download className="w-4 h-4" />
+                          Download Frame
+                        </Button>
+                      </div>
+                      {slideshowVideoUrl && (
+                        <Button
+                          variant="default"
+                          className="w-full"
+                          onClick={() => {
+                            const link = document.createElement("a");
+                            link.href = slideshowVideoUrl;
+                            link.download = `slideshow-${Date.now()}.webm`;
+                            link.click();
+                          }}
+                        >
+                          <Download className="w-4 h-4" />
+                          Download Slideshow Video
+                        </Button>
+                      )}
                     </div>
                   ) : null}
                 </motion.div>

@@ -11,12 +11,9 @@ const imageKit = new ImageKit({
 
 function toImageBlob(imageBase64: string): Blob {
   const isDataUrl = imageBase64.startsWith("data:");
-  const mimeType = isDataUrl
-    ? imageBase64.slice(imageBase64.indexOf(":") + 1, imageBase64.indexOf(";"))
-    : "image/png";
   const b64 = isDataUrl ? imageBase64.split(",")[1] : imageBase64;
   const buffer = Buffer.from(b64, "base64");
-  return new Blob([buffer], { type: mimeType || "image/png" });
+  return new Blob([buffer], { type: "image/png" });
 }
 
 export async function POST(request: Request) {
@@ -45,6 +42,7 @@ export async function POST(request: Request) {
     if (!sourceImageUrl) {
       return NextResponse.json({ error: "Failed to upload source image to ImageKit" }, { status: 500 });
     }
+    const sourcePngUrl = `${sourceImageUrl}${sourceImageUrl.includes("?") ? "&" : "?"}tr=f-png`;
 
     const openAiSizeMap: Record<string, string> = {
       "1:1": "1024x1024",
@@ -52,16 +50,49 @@ export async function POST(request: Request) {
       "9:16": "1024x1792",
     };
     const imageSize = openAiSizeMap[size] || "1024x1024";
-    const prompt = `Create a professional product ad image. Product details: ${description}. Keep the same product identity as this reference image URL: ${sourceImageUrl}. Output should follow aspect ratio ${size || "1:1"} with clean marketing layout and ad-ready visual quality.`;
+
+    // const prompt = `Create a professional product ad image sequence for a slideshow. Product details: ${description}. Keep the same product identity, same product colors/logo, and same overall visual style across all frames. Output should follow aspect ratio ${size || "1:1"} with clean marketing layout and ad-ready visual quality.`;
+    // const sequenceSteps = [
+    //   "Frame 1 (Hook): clean hero product intro with minimal text and strong focus on the product and include brand name",
+    //   "Frame 2 (Feature): same scene style, highlight one key product benefit with subtle composition change with one feature given in description",
+    //   "Frame 3 (Lifestyle/Use): same product and visual style, show contextual usage while keeping brand consistency.",
+    //   "Frame 4 (CTA): same style and product identity, end frame with promotional call-to-action and offer emphasis with discount given in description",
+    // ];
+
+
+    const prompt = `Create a professional product ad image sequence for a slideshow. Product details: ${description}. Keep the same product identity, same product colors/logo, and same overall visual style across all frames. Output should follow aspect ratio ${size || "1:1"} with clean marketing layout and ad-ready visual quality.`;
+    const sequenceSteps = [
+      "Frame 1 (Hook): clean hero product intro with minimal text and strong focus on the product and include brand name given in description",
+      "Frame 2 (Feature): same scene style, highlight one key product benefit with subtle composition change with one feature given in description",
+      "Frame 3 (Lifestyle/Use): Same product shown in a realistic lifestyle setting: modern lifestyle scene.Natural lighting, cinematic depth of field. No text,focus on real-world usage",
+      "Frame 4 (CTA): same style and product identity, end frame with promotional call-to-action and offer emphasis with discount given in description",
+    ];
+
+
+
 
     const images: string[] = [];
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 4; i++) {
+      let sourceBlob = toImageBlob(imageBase64);
+      try {
+        const pngRes = await fetch(sourcePngUrl);
+        if (pngRes.ok) {
+          const pngBuffer = Buffer.from(await pngRes.arrayBuffer());
+          sourceBlob = new Blob([pngBuffer], { type: "image/png" });
+        }
+      } catch (e) {
+        console.warn("Falling back to base64 image blob for OpenAI edit:", e);
+      }
+
       const form = new FormData();
-      form.append("model", "gpt-image-1");
-      form.append("prompt", `${prompt} Variation ${i + 1}. Keep the same product identity as the input image.`);
+      form.append("model", "dall-e-2");
+      form.append(
+        "prompt",
+        `${prompt} ${sequenceSteps[i] || sequenceSteps[sequenceSteps.length - 1]} Ensure this frame transitions naturally from the previous frame and is optimized for slideshow continuity.`
+      );
       form.append("size", imageSize);
       form.append("response_format", "b64_json");
-      form.append("image", toImageBlob(imageBase64), `source-${i + 1}.png`);
+      form.append("image", sourceBlob, `source-${i + 1}.png`);
 
       const openAiRes = await fetch("https://api.openai.com/v1/images/edits", {
         method: "POST",

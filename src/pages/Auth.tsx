@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+// import { useNavigate } from "react-router-dom";
+import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -23,13 +24,15 @@ export default function Auth() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const { user } = useAuth();
-  const navigate = useNavigate();
+  // const navigate = useNavigate();
+  const router = useRouter();
 
   useEffect(() => {
     if (user) {
-      navigate("/create");
+      // navigate("/create");
+      router.push("/create");
     }
-  }, [user, navigate]);
+  }, [user, router]);
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
